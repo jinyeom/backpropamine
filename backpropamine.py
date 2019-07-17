@@ -98,20 +98,24 @@ class SimpleNeuromodulationLSTM(nn.Module):
     self.hid_dim = hid_dim
 
     self.i2h = nn.Linear(obs_dim, hid_dim * 4)  # for each gate
-    self.W_hh = nn.Parameter(0.001 * torch.rand(hid_dim, hid_dim * 4))  # for each gate; parameter of interest!
-    self.modfanout = nn.Linear(1, hid_dim * 4)  # fan out modulator output for each neuron
-    self.alpha = nn.Parameter(0.001 * torch.rand(hid_dim, hid_dim * 4))  # one alpha coefficient per recurrent connection
+    self.gate_W_hh = nn.Parameter(0.001 * torch.rand(hid_dim, hid_dim * 3))  # for each of forget, input, output gates
+    self.cell_W_hh = nn.Parameter(0.001 * torch.rand(hid_dim, hid_dim))  # parameter of interest!
+    self.modfanout = nn.Linear(1, hid_dim)  # fan out modulator output for each neuron
+    self.alpha = nn.Parameter(0.001 * torch.rand(hid_dim, hid_dim))  # one alpha coefficient per recurrent connection
 
     self.actor = nn.Linear(hid_dim, act_dim)  # from recurrent to action probabilities
     self.critic = nn.Linear(hid_dim, 1)  # from recurrent to value prediction
     self.modulator = nn.Linear(hid_dim, 1)  # from the recurrent to neuromodulator output
 
   def mod_W_hh(self, hebb):
-    return self.W_hh + self.alpha * hebb
+    return self.cell_W_hh + self.alpha * hebb
 
   def forward(self, obs, hidden, hebb):
     h_pre, c = hidden
-    gates = self.i2h(obs) + torch.bmm(h_pre.unsqueeze(1), self.mod_W_hh(hebb)).squeeze(1)
+    gates = self.i2h(obs) + torch.cat([
+      torch.mm(h_pre, self.gate_W_hh),
+      torch.bmm(h_pre.unsqueeze(1), self.mod_W_hh(hebb)).squeeze(1)
+    ], dim=-1)
     f = torch.sigmoid(gates[:, :self.hid_dim])
     i = torch.sigmoid(gates[:, self.hid_dim:self.hid_dim*2])
     o = torch.sigmoid(gates[:, self.hid_dim*2:self.hid_dim*3])
@@ -122,7 +126,7 @@ class SimpleNeuromodulationLSTM(nn.Module):
     m = torch.tanh(self.modulator(h_post))
     delta_hebb = torch.bmm(h_pre.unsqueeze(2), h_post.unsqueeze(1))
     hebb = torch.clamp(hebb + self.modfanout(m.unsqueeze(2)) * delta_hebb, min=-2, max=2)
-    return act_prob, value_pred, m, h_post, hebb
+    return act_prob, value_pred, m, (h_post, c), hebb
 
 
 # agent with retroactive neuromodulation and eligibility traces
@@ -416,7 +420,7 @@ def main(args):
     elif args.model == 'snlstm':
       hidden = (torch.zeros(args.batch_size, args.hid_dim).to(device),
                 torch.zeros(args.batch_size, args.hid_dim).to(device))
-      hebb = torch.zeros(args.batch_size, *net.W_hh.shape).to(device)
+      hebb = torch.zeros(args.batch_size, *net.cell_W_hh.shape).to(device)
     elif args.model == 'retroactive':  # needs eligibility trace as well
       hidden = torch.zeros(args.batch_size, args.hid_dim).to(device)
       hebb = torch.zeros(args.batch_size, *net.W_hh.shape).to(device)
